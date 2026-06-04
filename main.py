@@ -6,14 +6,15 @@ import re
 import shutil
 import sqlite3
 import sys
+import zipfile
 from urllib import error as urlerror
 from urllib.request import Request, urlopen
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List
 
-from PySide6.QtCore import QPoint, Qt, QSize, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QImageReader, QKeySequence, QPainter, QPixmap
+from PySide6.QtCore import QPoint, QRect, Qt, QSize, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImageReader, QKeySequence, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,21 +34,25 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QStatusBar,
+    QStyledItemDelegate,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif"}
-APP_NAME = "ShelfReader"
-STATE_PATH = Path.home() / ".shelfreader.json"
-METADATA_PATH = Path.home() / ".shelfreader-library.json"
-ARCHIVE_DB_PATH = Path.home() / ".shelfreader-archive.db"
-ARCHIVE_TMP_DIR = Path.home() / ".shelfreader-archive-parts"
+BOOK_ARCHIVE_EXTENSIONS = {".cbz", ".zip"}
+APP_NAME = "GalleryReader"
+APP_BRAND = "galleryreader."
+APP_VERSION_LABEL = "LOCAL LIBRARY"
+STATE_PATH = Path.home() / ".galleryreader.json"
+METADATA_PATH = Path.home() / ".galleryreader-library.json"
+ARCHIVE_DB_PATH = Path.home() / ".galleryreader-archive.db"
+ARCHIVE_TMP_DIR = Path.home() / ".galleryreader-archive-parts"
 SORT_OPTIONS = ["Name (A-Z)", "Name (Z-A)", "Recently Read", "Page Count"]
 TAG_FILTER_ALL = "All tags"
-ARCHIVE_REPO_CONTENTS_URL = os.environ.get("COMIC_METADATA_ARCHIVE_URL", "https://example.com/community-comic-archive/backend")
-ARCHIVE_TABLE = "nh_data"
+ARCHIVE_REPO_CONTENTS_URL = "https://example.com/archive"
+ARCHIVE_TABLE = "archive_data"
 IGNORED_QUERY_TOKENS = {
     "english",
     "digital",
@@ -63,210 +68,267 @@ IGNORED_QUERY_TOKENS = {
 }
 APP_STYLE = """
 QMainWindow {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #1f1633,
-        stop:0.45 #251a3d,
-        stop:1 #161224);
+    background: #eef2f7;
 }
 QWidget {
-    color: #fdf4ff;
-    font-family: "Segoe UI", "Avenir Next", sans-serif;
-}
-QToolBar {
-    background: rgba(49, 33, 79, 0.96);
-    border: none;
-    border-bottom: 1px solid #5b467f;
-    spacing: 8px;
-    padding: 10px;
-}
-QToolButton {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #ff9bd6,
-        stop:0.55 #d8a8ff,
-        stop:1 #9ed8ff);
-    color: #241334;
-    border: 1px solid #ffd6ef;
-    border-radius: 14px;
-    padding: 9px 14px;
-    font-weight: 700;
-}
-QToolButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #ffb4e1,
-        stop:0.55 #e3bcff,
-        stop:1 #bae6ff);
-}
-QToolButton:pressed {
-    background: #e7b5ff;
+    color: #0f172a;
+    font-family: "Segoe UI", "SF Pro Text", "Inter", sans-serif;
+    font-size: 13px;
 }
 QStatusBar {
-    background: #140f22;
-    color: #e8dff8;
-    border-top: 1px solid #4c3968;
+    background: rgba(255, 255, 255, 0.96);
+    color: #667085;
+    border-top: 1px solid #d8dee8;
 }
 QWidget#comicIntroPage,
-QWidget#introContent {
+QWidget#introContent,
+QScrollArea {
     background: transparent;
+    border: none;
+}
+QWidget#readerPage {
+    background: #0b1220;
+}
+QWidget#readerBottomBar {
+    background: rgba(15, 23, 42, 0.78);
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 20px;
+}
+QWidget#appHeader,
+QWidget#seriesSummaryCard {
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #dde3ec;
+    border-radius: 20px;
+}
+QWidget#continueReadingCard {
+    background: rgba(255, 255, 255, 0.96);
+    border: none;
+    border-radius: 20px;
+}
+QLabel#appBrandMark {
+    color: #ffffff;
+    background: #111827;
+    border-radius: 12px;
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    font-size: 15px;
+    font-weight: 700;
+    qproperty-alignment: AlignCenter;
+}
+QLabel#appBrandTitle {
+    color: #0f172a;
+    font-size: 14px;
+    font-weight: 700;
+}
+QLabel#appBrandMeta,
+QLabel#seriesSummaryEyebrow,
+QLabel#continueEyebrow {
+    color: #667085;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+}
+QLabel#seriesSummaryTitle {
+    color: #0f172a;
+    font-size: 18px;
+    font-weight: 700;
+}
+QLabel#seriesSummaryMeta,
+QLabel#continueMeta {
+    color: #667085;
+    font-size: 13px;
+}
+QLabel#continueTitle {
+    color: #0f172a;
+    font-size: 14px;
+    font-weight: 700;
+}
+QWidget#readerTopBar {
+    background: rgba(15, 23, 42, 0.78);
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 20px;
+}
+QLabel#readerEyebrow {
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+}
+QLabel#readerTitle,
+QLabel#readerMeta {
+    color: #e5eefc;
+}
+QLabel#readerTitle {
+    font-size: 15px;
+    font-weight: 700;
+}
+QLabel#readerMeta {
+    font-size: 12px;
+    color: #94a3b8;
+}
+QLabel#readerChip {
+    color: #e5eefc;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    min-height: 40px;
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#readerBackButton {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f8fafc;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    min-height: 40px;
+    padding: 0 18px;
+}
+QPushButton#readerBackButton:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.18);
 }
 QWidget#introPanel,
 QWidget#introHeroPanel,
 QWidget#introRelatedPanel {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 rgba(43, 31, 69, 0.96),
-        stop:1 rgba(29, 22, 47, 0.96));
-    border: 1px solid #614b88;
-    border-radius: 24px;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #dde3ec;
+    border-radius: 22px;
 }
 QLabel#introTitle {
-    color: #ffe2f4;
+    color: #0f172a;
     font-size: 28px;
-    font-weight: 900;
-}
-QLabel#introMeta {
-    color: #e8dff8;
-    font-size: 14px;
-}
-QLabel#introBadge {
-    color: #251539;
-    font-size: 12px;
-    font-weight: 800;
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #ffc2e6,
-        stop:1 #c5ebff);
-    border-radius: 12px;
-    padding: 6px 10px;
-}
-QLabel#introSection {
-    color: #ffc7ea;
-    font-size: 15px;
-    font-weight: 800;
-    padding-top: 8px;
-}
-QLabel#introBody {
-    color: #f7f1ff;
-    font-size: 14px;
-    line-height: 1.35em;
-    background: rgba(19, 14, 31, 0.55);
-    border: 1px solid rgba(118, 93, 158, 0.7);
-    border-radius: 18px;
-    padding: 14px 16px;
-}
-QLabel#introTags {
-    color: #fdf4ff;
-    font-size: 13px;
-    line-height: 1.7em;
-    background: rgba(19, 14, 31, 0.55);
-    border: 1px solid rgba(118, 93, 158, 0.7);
-    border-radius: 18px;
-    padding: 14px 16px;
-}
-QLabel#introChip {
-    color: #f8efff;
-    font-size: 13px;
-    background: rgba(19, 14, 31, 0.7);
-    border: 1px solid #72579b;
-    border-radius: 16px;
-    padding: 10px 12px;
-}
-QListWidget#relatedList {
-    background: transparent;
-    border: none;
-    outline: none;
-}
-QListWidget#relatedList::item {
-    background: rgba(20, 15, 33, 0.78);
-    border: 1px solid #604a86;
-    border-radius: 18px;
-    padding: 12px;
-    margin: 4px 0;
-}
-QListWidget#relatedList::item:hover {
-    border: 1px solid #f0a8d8;
-    background: rgba(42, 31, 67, 0.92);
-}
-QListWidget#pagePreviewList {
-    background: transparent;
-    border: none;
-    outline: none;
-}
-QListWidget#pagePreviewList::item {
-    background: rgba(20, 15, 33, 0.78);
-    border: 1px solid #604a86;
-    border-radius: 18px;
-    padding: 8px;
-    margin: 4px;
-}
-QListWidget#pagePreviewList::item:hover {
-    border: 1px solid #f0a8d8;
-    background: rgba(42, 31, 67, 0.92);
-}
-QPushButton#heroReadButton {
-    min-width: 220px;
-    font-size: 15px;
-    padding: 13px 18px;
-}
-QLabel#sectionLabel {
-    color: #ffc7ea;
-    font-size: 26px;
-    font-weight: 800;
-}
-QLabel#helperLabel {
-    color: #d9d0ef;
-    font-size: 13px;
-    padding-bottom: 6px;
-}
-QLabel#sortLabel {
-    color: #e6dbf7;
-    font-size: 12px;
     font-weight: 700;
 }
+QLabel#introMeta {
+    color: #667085;
+    font-size: 13px;
+}
+QLabel#introBadge {
+    color: #334155;
+    font-size: 12px;
+    font-weight: 600;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 999px;
+    padding: 6px 11px;
+}
+QLabel#introSection {
+    color: #0f172a;
+    font-size: 15px;
+    font-weight: 700;
+    padding-top: 4px;
+}
+QLabel#introBody,
+QLabel#introTags,
+QLabel#introChip {
+    color: #334155;
+    font-size: 13px;
+    background: #f8fafc;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 14px 16px;
+}
+QListWidget#relatedList,
+QListWidget {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+QListWidget#libraryGrid::item {
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+    margin: 8px;
+}
+QListWidget#booksList::item,
+QListWidget#relatedList::item {
+    background: rgba(255, 255, 255, 0.97);
+    border: 1px solid #dbe2ea;
+    border-radius: 16px;
+    padding: 10px 12px;
+    margin: 6px 8px;
+}
+QListWidget::item:hover {
+    background: transparent;
+    border: none;
+}
+QListWidget::item:selected {
+    background: transparent;
+    border: none;
+    color: #0f172a;
+}
+QPushButton#heroReadButton {
+    min-width: 190px;
+}
+QLabel#sectionLabel {
+    color: #0f172a;
+    font-size: 22px;
+    font-weight: 700;
+}
+QLabel#helperLabel,
+QLabel#sortLabel {
+    color: #667085;
+    font-size: 12px;
+}
 QComboBox {
-    background: rgba(62, 44, 96, 0.96);
-    color: #fff4fd;
-    border: 1px solid #8868b7;
-    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.96);
+    color: #0f172a;
+    border: 1px solid #d8dee8;
+    border-radius: 14px;
     padding: 8px 12px;
     min-width: 190px;
 }
-QComboBox:hover {
-    border: 1px solid #f5b7de;
+QComboBox:hover,
+QComboBox:focus {
+    border: 1px solid #b8c4d3;
 }
 QComboBox QAbstractItemView {
-    background: #241934;
-    color: #fff4fd;
-    selection-background-color: #f0a8d8;
-    selection-color: #241334;
-    border: 1px solid #6b5390;
+    background: #ffffff;
+    color: #0f172a;
+    selection-background-color: #eef2ff;
+    selection-color: #0f172a;
+    border: 1px solid #d8dee8;
 }
 QPushButton {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #f8a7d8,
-        stop:0.55 #ddb0ff,
-        stop:1 #aee2ff);
-    color: #241334;
-    border: 1px solid #ffd7f0;
-    border-radius: 16px;
-    padding: 10px 16px;
-    font-weight: 800;
+    background: rgba(255, 255, 255, 0.96);
+    color: #0f172a;
+    border: 1px solid #d8dee8;
+    border-radius: 999px;
+    padding: 10px 15px;
+    font-weight: 600;
 }
 QPushButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #ffb8e3,
-        stop:0.55 #e7c2ff,
-        stop:1 #c2ecff);
+    background: #eef4ff;
+    border: 1px solid #93a4bb;
 }
 QPushButton#backButton {
-    max-width: 210px;
+    max-width: 180px;
+}
+QPushButton#headerButton {
+    background: rgba(255, 255, 255, 0.96);
+    color: #0f172a;
+    border: 1px solid #d8dee8;
+    border-radius: 20px;
+    min-height: 40px;
+    padding: 0 20px;
+}
+QPushButton#headerButton:hover {
+    background: #eef4ff;
+    border: 1px solid #93a4bb;
 }
 QMessageBox,
 QDialog,
 QProgressDialog {
-    background: #1b132b;
+    background: #ffffff;
 }
 QMessageBox QLabel,
 QDialog QLabel,
 QProgressDialog QLabel {
-    color: #fff4fd;
+    color: #0f172a;
 }
 QMessageBox QListView,
 QDialog QListView,
@@ -274,74 +336,316 @@ QMessageBox QComboBox,
 QDialog QComboBox,
 QMessageBox QLineEdit,
 QDialog QLineEdit {
-    background: #241934;
-    color: #fff4fd;
-    border: 1px solid #6b5390;
-    border-radius: 12px;
-    padding: 8px 10px;
+    background: #ffffff;
+    color: #0f172a;
+    border: 1px solid #d8dee8;
 }
 QMessageBox QPushButton,
 QDialog QPushButton,
 QProgressDialog QPushButton {
-    min-width: 110px;
+    min-width: 90px;
 }
-QProgressBar {
-    background: #241934;
-    color: #fff4fd;
-    border: 1px solid #6b5390;
-    border-radius: 10px;
-    text-align: center;
+QScrollBar:vertical {
+    background: transparent;
+    width: 12px;
+    margin: 4px 2px 4px 0;
 }
-QProgressBar::chunk {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #f8a7d8,
-        stop:0.55 #ddb0ff,
-        stop:1 #aee2ff);
-    border-radius: 9px;
+QScrollBar::handle:vertical {
+    background: #cbd5e1;
+    min-height: 32px;
+    border-radius: 6px;
 }
-QScrollArea {
-    background: #120d1f;
+QScrollBar::handle:vertical:hover {
+    background: #94a3b8;
+}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
     border: none;
 }
+"""
+
+APP_STYLE_DARK = """
+QMainWindow {
+    background: #07090d;
+}
+QWidget {
+    color: #eef2f7;
+    font-family: "Segoe UI", "SF Pro Text", "Inter", sans-serif;
+    font-size: 13px;
+}
+QStatusBar {
+    background: rgba(10, 12, 18, 0.98);
+    color: #8d98a7;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+QWidget#comicIntroPage,
+QWidget#introContent,
+QScrollArea,
+QWidget#readerPage {
+    background: #07090d;
+    border: none;
+}
+QWidget#readerTopBar,
+QWidget#readerBottomBar {
+    background: rgba(14, 17, 24, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+}
+QLabel#readerEyebrow {
+    color: #8d98a7;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+}
+QWidget#appHeader,
+QWidget#seriesSummaryCard {
+    background: rgba(14, 17, 24, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+}
+QWidget#continueReadingCard {
+    background: rgba(14, 17, 24, 0.96);
+    border: none;
+    border-radius: 20px;
+}
+QLabel#appBrandMark {
+    color: #f5f7fb;
+    background: #171b22;
+    border-radius: 12px;
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    font-size: 15px;
+    font-weight: 700;
+    qproperty-alignment: AlignCenter;
+}
+QLabel#appBrandTitle {
+    color: #f5f7fb;
+    font-size: 14px;
+    font-weight: 700;
+}
+QLabel#appBrandMeta,
+QLabel#seriesSummaryEyebrow,
+QLabel#continueEyebrow {
+    color: #8d98a7;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+}
+QLabel#seriesSummaryTitle {
+    color: #f5f7fb;
+    font-size: 18px;
+    font-weight: 700;
+}
+QLabel#seriesSummaryMeta,
+QLabel#continueMeta {
+    color: #8d98a7;
+    font-size: 13px;
+}
+QLabel#continueTitle {
+    color: #f5f7fb;
+    font-size: 14px;
+    font-weight: 700;
+}
+QLabel#readerTitle,
+QLabel#readerMeta {
+    color: #eef2f7;
+}
+QLabel#readerTitle {
+    font-size: 15px;
+    font-weight: 700;
+}
+QLabel#readerMeta {
+    font-size: 12px;
+    color: #8d98a7;
+}
+QLabel#readerChip {
+    color: #eef2f7;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    min-height: 40px;
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#readerBackButton {
+    background: rgba(255, 255, 255, 0.045);
+    color: #eef2f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    min-height: 40px;
+    padding: 0 18px;
+}
+QPushButton#readerBackButton:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+QWidget#introPanel,
+QWidget#introHeroPanel,
+QWidget#introRelatedPanel {
+    background: rgba(14, 17, 24, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 22px;
+}
+QLabel#introTitle,
+QLabel#sectionLabel,
+QLabel#introSection {
+    color: #f5f7fb;
+}
+QLabel#introTitle {
+    font-size: 28px;
+    font-weight: 700;
+}
+QLabel#introMeta,
+QLabel#helperLabel,
+QLabel#sortLabel {
+    color: #8d98a7;
+    font-size: 12px;
+}
+QLabel#introBadge {
+    color: #d6dde7;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    padding: 6px 11px;
+}
+QLabel#introBody,
+QLabel#introTags,
+QLabel#introChip {
+    color: #d9e0ea;
+    font-size: 13px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 16px;
+    padding: 14px 16px;
+}
+QListWidget#relatedList,
 QListWidget {
     background: transparent;
     border: none;
     outline: none;
-    color: #fff4fd;
 }
-QListWidget::item {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 rgba(57, 39, 90, 0.96),
-        stop:1 rgba(38, 28, 62, 0.96));
-    border: 1px solid #5e4984;
-    border-radius: 22px;
-    padding: 12px;
-    margin: 6px;
+QListWidget#libraryGrid::item {
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+    margin: 8px;
+}
+QListWidget#booksList::item,
+QListWidget#relatedList::item {
+    background: rgba(17, 20, 28, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 16px;
+    padding: 10px 12px;
+    margin: 6px 8px;
 }
 QListWidget::item:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 rgba(74, 50, 117, 0.98),
-        stop:1 rgba(49, 35, 79, 0.98));
-    border: 1px solid #f0a8d8;
+    background: transparent;
+    border: none;
 }
 QListWidget::item:selected {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 rgba(98, 65, 144, 0.98),
-        stop:1 rgba(62, 45, 98, 0.98));
-    border: 2px solid #f7b6df;
+    background: transparent;
+    border: none;
+    color: #eef2f7;
+}
+QPushButton#heroReadButton {
+    min-width: 190px;
+}
+QLabel#sectionLabel {
+    font-size: 22px;
+    font-weight: 700;
+}
+QComboBox {
+    background: rgba(17, 20, 28, 0.98);
+    color: #eef2f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 8px 12px;
+    min-width: 190px;
+}
+QComboBox:hover,
+QComboBox:focus {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+}
+QComboBox QAbstractItemView {
+    background: #11141c;
+    color: #eef2f7;
+    selection-background-color: rgba(255, 255, 255, 0.08);
+    selection-color: #eef2f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+QPushButton {
+    background: rgba(17, 20, 28, 0.98);
+    color: #eef2f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    padding: 10px 15px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background: rgba(255, 255, 255, 0.11);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+}
+QPushButton#backButton {
+    max-width: 180px;
+}
+QPushButton#headerButton {
+    background: rgba(255, 255, 255, 0.045);
+    color: #eef2f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+    min-height: 40px;
+    padding: 0 20px;
+}
+QPushButton#headerButton:hover {
+    background: rgba(255, 255, 255, 0.13);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+QMessageBox,
+QDialog,
+QProgressDialog {
+    background: #11141c;
+}
+QMessageBox QLabel,
+QDialog QLabel,
+QProgressDialog QLabel {
+    color: #eef2f7;
+}
+QMessageBox QListView,
+QDialog QListView,
+QMessageBox QComboBox,
+QDialog QComboBox,
+QMessageBox QLineEdit,
+QDialog QLineEdit {
+    background: #171b22;
+    color: #eef2f7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+QMessageBox QPushButton,
+QDialog QPushButton,
+QProgressDialog QPushButton {
+    min-width: 90px;
 }
 QScrollBar:vertical {
     background: transparent;
-    width: 14px;
-    margin: 6px 4px 6px 0;
+    width: 12px;
+    margin: 4px 2px 4px 0;
 }
 QScrollBar::handle:vertical {
-    background: rgba(240, 168, 216, 0.55);
+    background: #2a303a;
     min-height: 32px;
-    border-radius: 7px;
+    border-radius: 6px;
 }
 QScrollBar::handle:vertical:hover {
-    background: rgba(240, 168, 216, 0.82);
+    background: #3a414d;
 }
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical,
@@ -363,6 +667,12 @@ def list_image_files(folder: Path) -> List[Path]:
     return files
 
 
+def list_archive_books(folder: Path) -> List[Path]:
+    files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in BOOK_ARCHIVE_EXTENSIONS]
+    files.sort(key=lambda p: natural_key(p.name))
+    return files
+
+
 def list_subfolders(folder: Path) -> List[Path]:
     folders = [p for p in folder.iterdir() if p.is_dir()]
     folders.sort(key=lambda p: natural_key(p.name))
@@ -380,8 +690,105 @@ def first_cover_in_folder(folder: Path) -> Path | None:
     return None
 
 
-def build_cover_pixmap(image_path: Path, size: QSize) -> QPixmap | None:
-    cover = QPixmap(str(image_path))
+def is_archive_book(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in BOOK_ARCHIVE_EXTENSIONS
+
+
+def is_image_folder_book(path: Path) -> bool:
+    return path.is_dir() and bool(list_image_files(path))
+
+
+def list_books_in_series(series_folder: Path) -> List[Path]:
+    books = list_archive_books(series_folder)
+    books.extend(child for child in list_subfolders(series_folder) if is_image_folder_book(child))
+    books.sort(key=lambda p: natural_key(p.name))
+    return books
+
+
+def count_books_in_series(series_folder: Path) -> int:
+    return len(list_books_in_series(series_folder))
+
+
+def all_series_folders(root: Path) -> List[Path]:
+    series: List[Path] = []
+    for folder, dirnames, _ in os.walk(root, topdown=True):
+        path = Path(folder)
+        if count_books_in_series(path):
+            series.append(path)
+            dirnames[:] = []
+    series.sort(key=lambda p: natural_key(p.name))
+    return series
+
+
+@dataclass
+class PageEntry:
+    book_path: Path
+    page_path: Path | None = None
+    archive_member: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.page_path.name if self.page_path else Path(self.archive_member or "").name
+
+
+def list_pages_for_book(book: Path) -> List[PageEntry]:
+    if is_archive_book(book):
+        try:
+            with zipfile.ZipFile(book) as archive:
+                names = [
+                    name for name in archive.namelist()
+                    if not name.endswith("/") and Path(name).suffix.lower() in SUPPORTED_EXTENSIONS
+                ]
+        except Exception:
+            return []
+        names.sort(key=lambda name: natural_key(Path(name).name))
+        return [PageEntry(book_path=book, archive_member=name) for name in names]
+
+    if is_image_folder_book(book):
+        return [PageEntry(book_path=book, page_path=page) for page in list_image_files(book)]
+
+    return []
+
+
+def count_pages_in_book(book: Path) -> int:
+    return len(list_pages_for_book(book))
+
+
+def load_page_pixmap(page: PageEntry) -> QPixmap | None:
+    if page.page_path:
+        pixmap = QPixmap(str(page.page_path))
+        return None if pixmap.isNull() else pixmap
+
+    if page.archive_member:
+        try:
+            with zipfile.ZipFile(page.book_path) as archive:
+                data = archive.read(page.archive_member)
+        except Exception:
+            return None
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return None
+        return pixmap
+
+    return None
+
+
+def first_page_for_book(book: Path) -> PageEntry | None:
+    pages = list_pages_for_book(book)
+    return pages[0] if pages else None
+
+
+def first_cover_for_series(series_folder: Path) -> Path | None:
+    books = list_books_in_series(series_folder)
+    if not books:
+        return None
+    first_book = books[0]
+    if is_image_folder_book(first_book):
+        return first_cover_in_folder(first_book)
+    return None
+
+
+def build_cover_pixmap_from_base(cover: QPixmap, size: QSize, radius: float = 18.0) -> QPixmap | None:
     if cover.isNull():
         return None
 
@@ -392,18 +799,33 @@ def build_cover_pixmap(image_path: Path, size: QSize) -> QPixmap | None:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(34, 24, 54, 245))
-    painter.drawRoundedRect(canvas.rect(), 18, 18)
+    target = canvas.rect().adjusted(4, 4, -4, -4)
+    clip_path = QPainterPath()
+    clip_path.addRoundedRect(float(target.x()), float(target.y()), float(target.width()), float(target.height()), radius, radius)
+    painter.setClipPath(clip_path)
 
-    inner = canvas.rect().adjusted(10, 10, -10, -10)
-    scaled = cover.scaled(inner.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    x = inner.x() + (inner.width() - scaled.width()) // 2
-    y = inner.y() + (inner.height() - scaled.height()) // 2
+    scaled = cover.scaled(target.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+    x = target.x() + (target.width() - scaled.width()) // 2
+    y = target.y() + (target.height() - scaled.height()) // 2
     painter.drawPixmap(x, y, scaled)
 
     painter.end()
     return canvas
+
+
+def build_cover_pixmap(image_path: Path, size: QSize, radius: float = 18.0) -> QPixmap | None:
+    cover = QPixmap(str(image_path))
+    return build_cover_pixmap_from_base(cover, size, radius)
+
+
+def build_cover_pixmap_for_book(book: Path, size: QSize, radius: float = 18.0) -> QPixmap | None:
+    first_page = first_page_for_book(book)
+    if not first_page:
+        return None
+    pixmap = load_page_pixmap(first_page)
+    if pixmap is None:
+        return None
+    return build_cover_pixmap_from_base(pixmap, size, radius)
 
 
 def author_comic_folders(author_folder: Path) -> List[Path]:
@@ -411,17 +833,17 @@ def author_comic_folders(author_folder: Path) -> List[Path]:
 
 
 def count_direct_comics(author_folder: Path) -> int:
-    return len(author_comic_folders(author_folder))
+    return count_books_in_series(author_folder)
 
 
 def count_pages(folder: Path) -> int:
-    return len(list_image_files(folder))
+    return count_pages_in_book(folder)
 
 
 def all_comic_folders(root: Path) -> List[Path]:
     comics: List[Path] = []
-    for author in list_subfolders(root):
-        comics.extend(author_comic_folders(author))
+    for series_folder in all_series_folders(root):
+        comics.extend(list_books_in_series(series_folder))
     return comics
 
 
@@ -715,7 +1137,7 @@ class ReaderState:
     last_author: str = ""
     last_folder: str = ""
     last_page: int = 0
-    fit_mode: str = "fit_width"
+    fit_mode: str = "fit_page"
     zoom_percent: int = 100
     fullscreen: bool = False
     progress: dict[str, int] = field(default_factory=dict)
@@ -725,6 +1147,7 @@ class ReaderState:
     comic_tag_filter: str = ""
     favorite_comics: list[str] = field(default_factory=list)
     page_bookmarks: dict[str, list[int]] = field(default_factory=dict)
+    dark_mode: bool = False
 
     @classmethod
     def load(cls) -> "ReaderState":
@@ -804,6 +1227,62 @@ class ImageScrollArea(QScrollArea):
         super().mouseReleaseEvent(event)
 
 
+class GridTextDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        widget = option.widget
+        is_dark = bool(widget.property("darkMode")) if widget else False
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        lines = text.split("\n")
+        title = lines[0] if lines else ""
+        meta = lines[1] if len(lines) > 1 else ""
+
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        text_top = option.rect.top() + 4
+        if isinstance(icon, QIcon):
+            icon_size = option.decorationSize
+            icon_x = option.rect.x() + (option.rect.width() - icon_size.width()) // 2
+            icon_y = option.rect.y() + 4
+            icon_rect = QRect(icon_x, icon_y, icon_size.width(), icon_size.height())
+            icon.paint(painter, icon_rect, Qt.AlignmentFlag.AlignCenter)
+            text_top = icon_rect.bottom() + 14
+
+        bottom_padding = 10
+        meta_height = 18
+        gap = 8
+        meta_rect = QRect(
+            option.rect.x() + 16,
+            option.rect.bottom() - bottom_padding - meta_height + 1,
+            option.rect.width() - 32,
+            meta_height,
+        )
+        title_rect = QRect(
+            option.rect.x() + 14,
+            text_top,
+            option.rect.width() - 28,
+            max(24, meta_rect.y() - gap - text_top),
+        )
+
+        title_font = QFont(option.font)
+        title_font.setPointSize(12)
+        title_font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(title_font)
+        painter.setPen(QColor("#f8fafc") if is_dark else QColor("#0f172a"))
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, title)
+
+        meta_font = QFont(option.font)
+        meta_font.setPointSize(10)
+        meta_font.setWeight(QFont.Weight.Medium)
+        meta_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+        painter.setFont(meta_font)
+        painter.setPen(QColor("#94a3b8") if is_dark else QColor("#667085"))
+        painter.drawText(meta_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, meta.upper())
+
+        painter.restore()
+
+
 class GalleryView(QWidget):
     openFolder = Signal(Path)
     sortChanged = Signal(str)
@@ -815,20 +1294,23 @@ class GalleryView(QWidget):
         self.layout_mode = layout_mode
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 20, 28, 24)
+        layout.setSpacing(16)
 
-        self.title_label = QLabel("My little library ✨")
+        self.title_label = QLabel("Library")
         self.title_label.setObjectName("sectionLabel")
 
         self.label = QLabel(empty_text)
         self.label.setObjectName("helperLabel")
         self.label.setWordWrap(True)
 
+        self.meta_label = QLabel("LIBRARY")
+        self.meta_label.setObjectName("sortLabel")
+
         sort_row = QHBoxLayout()
         sort_row.setContentsMargins(0, 0, 0, 0)
         sort_row.setSpacing(10)
-        self.sort_label = QLabel("Sort the shelf")
+        self.sort_label = QLabel("Sort")
         self.sort_label.setObjectName("sortLabel")
         self.sort_box = QComboBox()
         self.sort_box.addItems(SORT_OPTIONS)
@@ -838,17 +1320,16 @@ class GalleryView(QWidget):
         self.filter_box = QComboBox()
         self.filter_box.addItem(TAG_FILTER_ALL)
         self.filter_box.currentTextChanged.connect(self._emit_tag_filter_changed)
+        self.sort_label.hide()
+        self.sort_box.hide()
         self.filter_label.hide()
         self.filter_box.hide()
-        sort_row.addWidget(self.sort_label, 0)
-        sort_row.addWidget(self.sort_box, 0)
-        sort_row.addWidget(self.filter_label, 0)
-        sort_row.addWidget(self.filter_box, 0)
         sort_row.addStretch(1)
 
         self.list_widget = QListWidget()
+        self.list_widget.setObjectName("booksList" if layout_mode == "list" else "libraryGrid")
         self.list_widget.setMovement(QListWidget.Movement.Static)
-        self.list_widget.setSpacing(18)
+        self.list_widget.setSpacing(14 if layout_mode == "list" else 20)
         self.list_widget.setUniformItemSizes(False)
         self.list_widget.itemDoubleClicked.connect(self._activate_item)
         self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -856,7 +1337,10 @@ class GalleryView(QWidget):
         self.list_widget.verticalScrollBar().setSingleStep(28)
         self.list_widget.verticalScrollBar().setPageStep(180)
         self._configure_list_widget()
+        if self.layout_mode != "list":
+            self.list_widget.setItemDelegate(GridTextDelegate(self.list_widget))
 
+        layout.addWidget(self.meta_label)
         layout.addWidget(self.title_label)
         layout.addWidget(self.label)
         layout.addLayout(sort_row)
@@ -868,19 +1352,20 @@ class GalleryView(QWidget):
             self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
             self.list_widget.setWrapping(False)
             self.list_widget.setWordWrap(False)
-            self.list_widget.setIconSize(QSize(104, 148))
+            self.list_widget.setIconSize(QSize(96, 136))
             self.list_widget.setTextElideMode(Qt.TextElideMode.ElideRight)
         else:
             self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
             self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
             self.list_widget.setWordWrap(True)
-            self.list_widget.setIconSize(QSize(200, 280))
-            self.list_widget.setGridSize(QSize(264, 400))
+            self.list_widget.setIconSize(QSize(236, 338))
+            self.list_widget.setGridSize(QSize(296, 452))
             self.list_widget.setTextElideMode(Qt.TextElideMode.ElideNone)
 
     def clear_gallery(self, title_text: str, label_text: str) -> None:
         self.title_label.setText(title_text)
         self.label.setText(label_text)
+        self.meta_label.setText("AVAILABLE FILES" if self.layout_mode == "list" else "LIBRARY CATALOG")
         self.list_widget.clear()
 
     def set_sort_mode(self, mode: str) -> None:
@@ -921,34 +1406,37 @@ class GalleryView(QWidget):
         self.clear_gallery(title, subtitle)
 
         if self.layout_mode == "list":
-            icon_size = QSize(104, 148)
+            icon_size = QSize(96, 136)
             self.list_widget.setIconSize(icon_size)
         else:
-            icon_size = QSize(200, 280) if show_page_count else QSize(208, 300)
-            grid_size = QSize(264, 404) if show_page_count else QSize(272, 412)
-            item_height = 392 if show_page_count else 372
+            icon_size = QSize(236, 338)
+            grid_size = QSize(296, 452)
+            item_height = 438
             self.list_widget.setIconSize(icon_size)
             self.list_widget.setGridSize(grid_size)
 
-        for folder in folders:
-            favorite_mark = "♥ " if favorites and str(folder) in favorites else ""
+        for idx, folder in enumerate(folders, start=1):
+            favorite_mark = "Saved · " if favorites and str(folder) in favorites else ""
             item = QListWidgetItem(f"{favorite_mark}{folder.name}")
             item.setData(Qt.ItemDataRole.UserRole, str(folder))
 
             if show_page_count:
-                pages = list_image_files(folder)
-                if not pages:
+                page_count = count_pages_in_book(folder)
+                if not page_count:
                     continue
-                page_count = len(pages)
                 progress_text = "Unread"
                 if str(folder) in progress:
                     progress_text = f"Page {progress[str(folder)] + 1}/{page_count}"
-                item.setText(f"{folder.name}\n{page_count} pages\n{progress_text}")
-                item.setToolTip(f"{folder.name}\n{page_count} pages\n{progress_text}")
+                if self.layout_mode == "list":
+                    item.setText(f"#{idx:02d}  {folder.name}\n{page_count} PAGES · {progress_text.upper()}")
+                    item.setToolTip(f"{folder.name}\n{page_count} pages\n{progress_text}")
+                else:
+                    item.setText(f"{folder.name}\n{page_count} pages")
+                    item.setToolTip(f"{folder.name}\n{page_count} pages\n{progress_text}")
             else:
-                comic_count = count_direct_comics(folder)
-                item.setText(f"{folder.name}\n{comic_count} comics")
-                item.setToolTip(f"{folder.name}\n{comic_count} comics")
+                comic_count = count_books_in_series(folder)
+                item.setText(f"{folder.name}\n{comic_count} issues")
+                item.setToolTip(f"{folder.name}\n{comic_count} issues")
 
             metadata = (metadata_records or {}).get(str(folder))
             if metadata:
@@ -963,19 +1451,19 @@ class GalleryView(QWidget):
                     tooltip_lines.append(f"Tags: {', '.join(metadata['tags'][:10])}")
                 item.setToolTip("\n".join(line for line in tooltip_lines if line))
 
-            cover_path = (
-                author_cover_for_display(folder, thumbnail_overrides or {})
-                if thumbnail_overrides is not None
-                else first_cover_in_folder(folder)
-            )
-            if cover_path:
-                cover = build_cover_pixmap(cover_path, icon_size)
-                if cover is not None:
-                    item.setIcon(QIcon(cover))
+            cover = None
+            if show_page_count:
+                cover = build_cover_pixmap_for_book(folder, icon_size)
+            else:
+                books = list_books_in_series(folder)
+                if books:
+                    cover = build_cover_pixmap_for_book(books[0], icon_size)
+            if cover is not None:
+                item.setIcon(QIcon(cover))
 
             if self.layout_mode == "list":
                 item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                item.setSizeHint(QSize(0, 168))
+                item.setSizeHint(QSize(0, 144))
             else:
                 item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
                 item.setSizeHint(QSize(grid_size.width() - 14, item_height))
@@ -1005,7 +1493,7 @@ class ComicReader(QMainWindow):
         self.current_root: Path | None = None
         self.current_author: Path | None = None
         self.current_folder: Path | None = None
-        self.pages: List[Path] = []
+        self.pages: List[PageEntry] = []
         self.current_index = 0
         self.base_pixmap: QPixmap | None = None
         self.fit_mode = self.state.fit_mode
@@ -1013,40 +1501,230 @@ class ComicReader(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.resize(1400, 950)
-        self.setStyleSheet(APP_STYLE)
 
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.image_label.setStyleSheet("background: #111;")
+        self.image_label.setStyleSheet("background: #0f172a; border-radius: 18px;")
         self.scroll_area = ImageScrollArea(self.image_label)
 
-        self.author_gallery = GalleryView("Choose a root folder to build your gallery.", layout_mode="grid")
+        self.author_gallery = GalleryView("Choose a library to begin.", layout_mode="grid")
+
+        self.author_gallery_page = QWidget()
+        author_gallery_layout = QVBoxLayout(self.author_gallery_page)
+        author_gallery_layout.setContentsMargins(0, 0, 0, 0)
+        author_gallery_layout.setSpacing(0)
+        author_gallery_top_row = QHBoxLayout()
+        author_gallery_top_row.setContentsMargins(28, 22, 28, 0)
+        author_gallery_top_row.setSpacing(12)
+        self.author_header = QWidget()
+        self.author_header.setObjectName("appHeader")
+        author_header_layout = QHBoxLayout(self.author_header)
+        author_header_layout.setContentsMargins(18, 14, 18, 14)
+        author_header_layout.setSpacing(14)
+        self.author_brand_mark = QLabel("GR")
+        self.author_brand_mark.setObjectName("appBrandMark")
+        author_brand_stack = QVBoxLayout()
+        author_brand_stack.setContentsMargins(0, 0, 0, 0)
+        author_brand_stack.setSpacing(2)
+        self.author_brand_title = QLabel(APP_BRAND)
+        self.author_brand_title.setObjectName("appBrandTitle")
+        self.author_brand_meta = QLabel(APP_VERSION_LABEL)
+        self.author_brand_meta.setObjectName("appBrandMeta")
+        author_brand_stack.addWidget(self.author_brand_title)
+        author_brand_stack.addWidget(self.author_brand_meta)
+        self.author_theme_button = QPushButton("Light mode")
+        self.author_theme_button.setObjectName("headerButton")
+        self.author_theme_button.setMinimumHeight(40)
+        self.author_theme_button.clicked.connect(self.toggle_dark_mode)
+        self.author_open_library_button = QPushButton("Local Disk")
+        self.author_open_library_button.setObjectName("headerButton")
+        self.author_open_library_button.setMinimumHeight(40)
+        self.author_open_library_button.clicked.connect(self.choose_root)
+        author_header_layout.addWidget(self.author_brand_mark, 0)
+        author_header_layout.addLayout(author_brand_stack, 0)
+        author_header_layout.addStretch(1)
+        author_header_layout.addWidget(self.author_theme_button, 0)
+        author_header_layout.addWidget(self.author_open_library_button, 0)
+        author_gallery_top_row.addWidget(self.author_header, 1)
+        author_gallery_layout.addLayout(author_gallery_top_row)
+        author_gallery_layout.addSpacing(22)
+        self.continue_card = QWidget()
+        self.continue_card.setObjectName("continueReadingCard")
+        continue_layout = QHBoxLayout(self.continue_card)
+        continue_layout.setContentsMargins(16, 14, 16, 14)
+        continue_layout.setSpacing(14)
+        self.continue_cover = QLabel()
+        self.continue_cover.setFixedSize(48, 72)
+        self.continue_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.continue_cover.setStyleSheet("background: transparent; border: none; border-radius: 10px;")
+        continue_text = QVBoxLayout()
+        continue_text.setContentsMargins(0, 0, 0, 0)
+        continue_text.setSpacing(2)
+        self.continue_eyebrow = QLabel("CONTINUE READING")
+        self.continue_eyebrow.setObjectName("continueEyebrow")
+        self.continue_title = QLabel("")
+        self.continue_title.setObjectName("continueTitle")
+        self.continue_meta = QLabel("")
+        self.continue_meta.setObjectName("continueMeta")
+        continue_text.addWidget(self.continue_eyebrow)
+        continue_text.addWidget(self.continue_title)
+        continue_text.addWidget(self.continue_meta)
+        continue_actions = QHBoxLayout()
+        continue_actions.setContentsMargins(0, 0, 0, 0)
+        continue_actions.setSpacing(8)
+        self.clear_continue_button = QPushButton("Clear Progress")
+        self.clear_continue_button.clicked.connect(self.clear_continue_reading)
+        self.resume_continue_button = QPushButton("Resume")
+        self.resume_continue_button.clicked.connect(self.resume_last_read_comic)
+        continue_actions.addWidget(self.clear_continue_button, 0)
+        continue_actions.addWidget(self.resume_continue_button, 0)
+        continue_shell = QVBoxLayout()
+        continue_shell.setContentsMargins(0, 0, 0, 0)
+        continue_shell.setSpacing(8)
+        continue_shell.addLayout(continue_text)
+        continue_shell.addLayout(continue_actions)
+        continue_layout.addWidget(self.continue_cover, 0)
+        continue_layout.addLayout(continue_shell, 1)
+        self.continue_card.hide()
+        author_gallery_layout.addWidget(self.continue_card, 0)
+        author_gallery_layout.addWidget(self.author_gallery, 1)
         self.author_gallery.openFolder.connect(self.open_author)
         self.author_gallery.sortChanged.connect(self.on_author_sort_changed)
         self.author_gallery.authorThumbnailMenuRequested.connect(self.show_author_thumbnail_menu)
         self.author_gallery.set_sort_mode(self.state.author_sort)
 
-        self.comic_gallery = GalleryView("Choose an author.", layout_mode="grid")
+        self.comic_gallery = GalleryView("Choose a series to see its books.", layout_mode="grid")
         self.comic_gallery.openFolder.connect(self.open_comic)
         self.comic_gallery.sortChanged.connect(self.on_comic_sort_changed)
         self.comic_gallery.tagFilterChanged.connect(self.on_tag_filter_changed)
         self.comic_gallery.set_sort_mode(self.state.comic_sort)
-        self.comic_gallery.set_filter_visible(True)
+        self.comic_gallery.set_filter_visible(False)
+
+        self.comic_gallery_page = QWidget()
+        comic_gallery_layout = QVBoxLayout(self.comic_gallery_page)
+        comic_gallery_layout.setContentsMargins(0, 0, 0, 0)
+        comic_gallery_layout.setSpacing(0)
+        comic_gallery_top_row = QHBoxLayout()
+        comic_gallery_top_row.setContentsMargins(28, 22, 28, 0)
+        comic_gallery_top_row.setSpacing(12)
+        self.comic_header = QWidget()
+        self.comic_header.setObjectName("appHeader")
+        comic_header_layout = QHBoxLayout(self.comic_header)
+        comic_header_layout.setContentsMargins(18, 14, 18, 14)
+        comic_header_layout.setSpacing(12)
+        self.series_back_button = QPushButton("← Back to series")
+        self.series_back_button.setObjectName("headerButton")
+        self.series_back_button.clicked.connect(self.show_author_gallery)
+        comic_title_stack = QVBoxLayout()
+        comic_title_stack.setContentsMargins(0, 0, 0, 0)
+        comic_title_stack.setSpacing(2)
+        self.comic_brand_title = QLabel("Series")
+        self.comic_brand_title.setObjectName("appBrandTitle")
+        self.comic_brand_meta = QLabel("AVAILABLE FILES")
+        self.comic_brand_meta.setObjectName("appBrandMeta")
+        comic_title_stack.addWidget(self.comic_brand_title)
+        comic_title_stack.addWidget(self.comic_brand_meta)
+        self.comic_theme_button = QPushButton("Light mode")
+        self.comic_theme_button.setObjectName("headerButton")
+        self.comic_theme_button.setMinimumHeight(40)
+        self.comic_theme_button.clicked.connect(self.toggle_dark_mode)
+        self.change_root_button = QPushButton("Local Disk")
+        self.change_root_button.setObjectName("headerButton")
+        self.change_root_button.setMinimumHeight(40)
+        self.change_root_button.clicked.connect(self.choose_root)
+        comic_header_layout.addWidget(self.series_back_button, 0)
+        comic_header_layout.addLayout(comic_title_stack, 0)
+        comic_header_layout.addStretch(1)
+        comic_header_layout.addWidget(self.comic_theme_button, 0)
+        comic_header_layout.addWidget(self.change_root_button, 0)
+        comic_gallery_top_row.addWidget(self.comic_header, 1)
+        comic_gallery_layout.addLayout(comic_gallery_top_row)
+        comic_gallery_layout.addSpacing(22)
+        self.series_summary_card = QWidget()
+        self.series_summary_card.setObjectName("seriesSummaryCard")
+        self.series_summary_card.hide()
+        summary_layout = QHBoxLayout(self.series_summary_card)
+        summary_layout.setContentsMargins(18, 18, 18, 18)
+        summary_layout.setSpacing(16)
+        self.series_summary_cover = QLabel()
+        self.series_summary_cover.setFixedSize(76, 108)
+        self.series_summary_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.series_summary_cover.setStyleSheet("background: #e5e7eb; border: 1px solid #d8dee8; border-radius: 14px;")
+        summary_text = QVBoxLayout()
+        summary_text.setContentsMargins(0, 0, 0, 0)
+        summary_text.setSpacing(4)
+        self.series_summary_eyebrow = QLabel("ACTIVE FOLDER")
+        self.series_summary_eyebrow.setObjectName("seriesSummaryEyebrow")
+        self.series_summary_title = QLabel("Series")
+        self.series_summary_title.setObjectName("seriesSummaryTitle")
+        self.series_summary_meta = QLabel("")
+        self.series_summary_meta.setObjectName("seriesSummaryMeta")
+        self.series_summary_meta.setWordWrap(True)
+        summary_text.addWidget(self.series_summary_eyebrow)
+        summary_text.addWidget(self.series_summary_title)
+        summary_text.addWidget(self.series_summary_meta)
+        summary_layout.addWidget(self.series_summary_cover, 0)
+        summary_layout.addLayout(summary_text, 1)
+        comic_gallery_layout.addWidget(self.series_summary_card, 0)
+        comic_gallery_layout.addSpacing(8)
+        comic_gallery_layout.addWidget(self.comic_gallery, 1)
 
         self.reader_page = QWidget()
+        self.reader_page.setObjectName("readerPage")
         reader_layout = QVBoxLayout(self.reader_page)
-        reader_layout.setContentsMargins(0, 0, 0, 0)
-        reader_top_row = QHBoxLayout()
-        reader_top_row.setContentsMargins(10, 10, 10, 0)
-        reader_top_row.setSpacing(10)
-        self.back_button = QPushButton("← Back to shelf")
-        self.back_button.setObjectName("backButton")
+        reader_layout.setContentsMargins(24, 18, 24, 24)
+        reader_layout.setSpacing(14)
+        self.reader_top_bar = QWidget()
+        self.reader_top_bar.setObjectName("readerTopBar")
+        reader_top_row = QHBoxLayout(self.reader_top_bar)
+        reader_top_row.setContentsMargins(18, 14, 18, 14)
+        reader_top_row.setSpacing(12)
+        self.back_button = QPushButton("← Back to books")
+        self.back_button.setObjectName("readerBackButton")
+        self.back_button.setMinimumHeight(40)
         self.back_button.clicked.connect(self.show_comic_gallery)
+        self.reader_eyebrow_label = QLabel("READING")
+        self.reader_eyebrow_label.setObjectName("readerEyebrow")
+        self.reader_title_label = QLabel("Reader")
+        self.reader_title_label.setObjectName("readerTitle")
+        self.reader_meta_label = QLabel("")
+        self.reader_meta_label.setObjectName("readerMeta")
+        self.reader_mode_chip = QLabel("FIT PAGE")
+        self.reader_mode_chip.setObjectName("readerChip")
+        self.reader_mode_chip.setMinimumHeight(40)
+        reader_title_stack = QVBoxLayout()
+        reader_title_stack.setContentsMargins(0, 0, 0, 0)
+        reader_title_stack.setSpacing(1)
+        reader_title_stack.addWidget(self.reader_eyebrow_label)
+        reader_title_stack.addWidget(self.reader_title_label)
+        reader_title_stack.addWidget(self.reader_meta_label)
         reader_top_row.addWidget(self.back_button, 0)
-        reader_top_row.addStretch(1)
-        reader_layout.addLayout(reader_top_row)
+        reader_top_row.addLayout(reader_title_stack, 1)
+        reader_top_row.addWidget(self.reader_mode_chip, 0)
+        reader_layout.addWidget(self.reader_top_bar, 0)
         reader_layout.addWidget(self.scroll_area, 1)
+        self.reader_bottom_bar = QWidget()
+        self.reader_bottom_bar.setObjectName("readerBottomBar")
+        reader_bottom_row = QHBoxLayout(self.reader_bottom_bar)
+        reader_bottom_row.setContentsMargins(18, 12, 18, 12)
+        reader_bottom_row.setSpacing(12)
+        self.reader_prev_button = QPushButton("Previous")
+        self.reader_prev_button.setObjectName("readerBackButton")
+        self.reader_prev_button.setMinimumHeight(40)
+        self.reader_prev_button.clicked.connect(self.prev_page)
+        self.reader_next_button = QPushButton("Next")
+        self.reader_next_button.setObjectName("readerBackButton")
+        self.reader_next_button.setMinimumHeight(40)
+        self.reader_next_button.clicked.connect(self.next_page)
+        self.reader_progress_label = QLabel("0 / 0")
+        self.reader_progress_label.setObjectName("readerChip")
+        self.reader_progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.reader_progress_label.setMinimumHeight(40)
+        reader_bottom_row.addWidget(self.reader_prev_button, 0)
+        reader_bottom_row.addWidget(self.reader_progress_label, 1)
+        reader_bottom_row.addWidget(self.reader_next_button, 0)
+        reader_layout.addWidget(self.reader_bottom_bar, 0)
 
         self.comic_intro_page = QWidget()
         self.comic_intro_page.setObjectName("comicIntroPage")
@@ -1055,12 +1733,12 @@ class ComicReader(QMainWindow):
         intro_outer.setSpacing(0)
 
         intro_top = QHBoxLayout()
-        intro_top.setContentsMargins(14, 14, 14, 8)
+        intro_top.setContentsMargins(24, 18, 24, 8)
         intro_top.setSpacing(10)
-        self.intro_back_button = QPushButton("← Back to comics")
-        self.intro_back_button.setObjectName("backButton")
+        self.intro_back_button = QPushButton("← Back to books")
+        self.intro_back_button.setObjectName("headerButton")
         self.intro_back_button.clicked.connect(self.show_comic_gallery)
-        self.intro_read_button = QPushButton("Start reading ✨")
+        self.intro_read_button = QPushButton("Open book")
         self.intro_read_button.setObjectName("heroReadButton")
         self.intro_read_button.clicked.connect(self.start_reading_current_comic)
         intro_top.addWidget(self.intro_back_button, 0)
@@ -1090,9 +1768,9 @@ class ComicReader(QMainWindow):
         self.intro_cover_label = QLabel()
         self.intro_cover_label.setFixedSize(300, 420)
         self.intro_cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.intro_cover_label.setStyleSheet("background: rgba(15, 10, 26, 0.9); border: 1px solid #5e4984; border-radius: 24px;")
+        self.intro_cover_label.setStyleSheet("background: #e2e8f0; border: 1px solid #d8dee8; border-radius: 20px;")
         cover_panel_layout.addWidget(self.intro_cover_label, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.intro_cover_hint = QLabel("Tap start reading when you’re ready 💗")
+        self.intro_cover_hint = QLabel("Open the book when you're ready to read.")
         self.intro_cover_hint.setObjectName("helperLabel")
         self.intro_cover_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cover_panel_layout.addWidget(self.intro_cover_hint)
@@ -1103,7 +1781,7 @@ class ComicReader(QMainWindow):
         hero_panel_layout = QVBoxLayout(hero_panel)
         hero_panel_layout.setContentsMargins(22, 22, 22, 22)
         hero_panel_layout.setSpacing(10)
-        self.intro_title_label = QLabel("Pick a comic 💗")
+        self.intro_title_label = QLabel("Book details")
         self.intro_title_label.setObjectName("introTitle")
         self.intro_title_label.setWordWrap(True)
         self.intro_meta_label = QLabel("")
@@ -1111,11 +1789,11 @@ class ComicReader(QMainWindow):
         self.intro_meta_label.setWordWrap(True)
         badges_row = QHBoxLayout()
         badges_row.setSpacing(10)
-        self.intro_code_badge = QLabel("Code —")
+        self.intro_code_badge = QLabel("Book")
         self.intro_code_badge.setObjectName("introBadge")
-        self.intro_status_badge = QLabel("Tags pending")
+        self.intro_status_badge = QLabel("Ready")
         self.intro_status_badge.setObjectName("introBadge")
-        self.intro_favorite_badge = QLabel("♡ Not favorite")
+        self.intro_favorite_badge = QLabel("Not saved")
         self.intro_favorite_badge.setObjectName("introBadge")
         badges_row.addWidget(self.intro_code_badge, 0)
         badges_row.addWidget(self.intro_status_badge, 0)
@@ -1123,33 +1801,17 @@ class ComicReader(QMainWindow):
         badges_row.addStretch(1)
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
-        self.intro_resume_button = QPushButton("Resume from last page")
+        self.intro_resume_button = QPushButton("Resume")
         self.intro_resume_button.clicked.connect(self.resume_current_comic)
-        self.intro_favorite_button = QPushButton("♡ Favorite")
-        self.intro_favorite_button.clicked.connect(self.toggle_current_favorite)
-        self.intro_random_button = QPushButton("Random comic 🎲")
-        self.intro_random_button.clicked.connect(self.open_random_comic)
-        self.intro_folder_button = QPushButton("Open comic folder")
+        self.intro_folder_button = QPushButton("Copy path")
         self.intro_folder_button.clicked.connect(self.copy_current_folder_path)
         action_row.addWidget(self.intro_read_button, 0)
         action_row.addWidget(self.intro_resume_button, 0)
-        action_row.addWidget(self.intro_favorite_button, 0)
-        action_row.addWidget(self.intro_random_button, 0)
         action_row.addWidget(self.intro_folder_button, 0)
         action_row.addStretch(1)
         self.intro_summary_label = QLabel("")
         self.intro_summary_label.setObjectName("introBody")
         self.intro_summary_label.setWordWrap(True)
-        self.intro_tags_title = QLabel("Tags")
-        self.intro_tags_title.setObjectName("introSection")
-        self.intro_tags_label = QLabel("")
-        self.intro_tags_label.setObjectName("introTags")
-        self.intro_tags_label.setWordWrap(True)
-        self.intro_tags_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse
-        )
-        self.intro_tags_label.setOpenExternalLinks(False)
-        self.intro_tags_label.linkActivated.connect(self.apply_tag_filter_from_intro)
         self.intro_details_title = QLabel("Details")
         self.intro_details_title.setObjectName("introSection")
         details_grid = QGridLayout()
@@ -1175,8 +1837,6 @@ class ComicReader(QMainWindow):
         hero_panel_layout.addLayout(badges_row)
         hero_panel_layout.addLayout(action_row)
         hero_panel_layout.addWidget(self.intro_summary_label)
-        hero_panel_layout.addWidget(self.intro_tags_title)
-        hero_panel_layout.addWidget(self.intro_tags_label)
         hero_panel_layout.addWidget(self.intro_details_title)
         hero_panel_layout.addLayout(details_grid)
         hero_row.addWidget(hero_panel, 1)
@@ -1187,9 +1847,9 @@ class ComicReader(QMainWindow):
         related_layout = QVBoxLayout(related_panel)
         related_layout.setContentsMargins(20, 18, 20, 18)
         related_layout.setSpacing(10)
-        self.intro_related_title = QLabel("More like this")
+        self.intro_related_title = QLabel("More books")
         self.intro_related_title.setObjectName("introSection")
-        self.intro_related_hint = QLabel("Double-click a related comic to open its info page.")
+        self.intro_related_hint = QLabel("Open another book from here when you want to keep browsing.")
         self.intro_related_hint.setObjectName("helperLabel")
         self.intro_related_list = QListWidget()
         self.intro_related_list.setObjectName("relatedList")
@@ -1200,37 +1860,16 @@ class ComicReader(QMainWindow):
         related_layout.addWidget(self.intro_related_list)
         intro_layout.addWidget(related_panel)
 
-        preview_panel = QWidget()
-        preview_panel.setObjectName("introRelatedPanel")
-        preview_layout = QVBoxLayout(preview_panel)
-        preview_layout.setContentsMargins(20, 18, 20, 18)
-        preview_layout.setSpacing(10)
-        self.intro_preview_title = QLabel("Page preview")
-        self.intro_preview_title.setObjectName("introSection")
-        self.intro_preview_hint = QLabel("Double-click a page to jump straight into the reader there.")
-        self.intro_preview_hint.setObjectName("helperLabel")
-        self.intro_page_preview_list = QListWidget()
-        self.intro_page_preview_list.setObjectName("pagePreviewList")
-        self.intro_page_preview_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.intro_page_preview_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.intro_page_preview_list.setMovement(QListWidget.Movement.Static)
-        self.intro_page_preview_list.setSpacing(8)
-        self.intro_page_preview_list.setIconSize(QSize(120, 168))
-        self.intro_page_preview_list.setGridSize(QSize(150, 230))
-        self.intro_page_preview_list.itemDoubleClicked.connect(self._open_preview_page)
-        preview_layout.addWidget(self.intro_preview_title)
-        preview_layout.addWidget(self.intro_preview_hint)
-        preview_layout.addWidget(self.intro_page_preview_list)
-        intro_layout.addWidget(preview_panel)
-
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.author_gallery)
-        self.stack.addWidget(self.comic_gallery)
+        self.stack.addWidget(self.author_gallery_page)
+        self.stack.addWidget(self.comic_gallery_page)
         self.stack.addWidget(self.comic_intro_page)
         self.stack.addWidget(self.reader_page)
         self.setCentralWidget(self.stack)
 
         self.setStatusBar(QStatusBar())
+        self._theme_buttons = [self.author_theme_button, self.comic_theme_button]
+        self.apply_theme()
         self._build_toolbar()
         self._build_actions()
 
@@ -1239,9 +1878,9 @@ class ComicReader(QMainWindow):
             if root.exists():
                 self.open_root(root)
                 if self.state.last_author:
-                    author = Path(self.state.last_author)
-                    if author.exists():
-                        self.open_author(author)
+                    series = Path(self.state.last_author)
+                    if series.exists():
+                        self.open_author(series)
                 if self.state.last_folder:
                     folder = Path(self.state.last_folder)
                     if folder.exists():
@@ -1251,18 +1890,12 @@ class ComicReader(QMainWindow):
             self.showFullScreen()
 
     def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(16, 16))
-        self.addToolBar(toolbar)
-        self.toolbar = toolbar
+        self.toolbar = None
 
     def _build_actions(self) -> None:
         actions = [
             ("Open Gallery Root", self.choose_root, "Ctrl+O"),
-            ("Random Comic", self.open_random_comic, "Ctrl+R"),
-            ("Prepare Tag Archive", self.prepare_tag_archive, "Ctrl+Shift+A"),
-            ("Import Tags", self.import_tags_for_scope, "Ctrl+I"),
+            ("Random Book", self.open_random_comic, "Ctrl+R"),
             ("Toggle Favorite", self.toggle_current_favorite, "Ctrl+D"),
             ("Toggle Page Bookmark", self.toggle_current_page_bookmark, "Ctrl+B"),
             ("Back", self.go_back, "Escape"),
@@ -1282,7 +1915,119 @@ class ComicReader(QMainWindow):
             if shortcut:
                 action.setShortcut(QKeySequence(shortcut))
             self.addAction(action)
-            self.toolbar.addAction(action)
+
+    def apply_theme(self) -> None:
+        is_dark = self.state.dark_mode
+        self.setStyleSheet(APP_STYLE_DARK if is_dark else APP_STYLE)
+        self.image_label.setStyleSheet(
+            "background: #04060a; border-radius: 18px;"
+            if is_dark
+            else "background: #0f172a; border-radius: 18px;"
+        )
+        self.intro_cover_label.setStyleSheet(
+            "background: #11141c; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px;"
+            if is_dark
+            else "background: #e2e8f0; border: 1px solid #d8dee8; border-radius: 20px;"
+        )
+        self.continue_cover.setStyleSheet(
+            "background: transparent; border: none; border-radius: 10px;"
+        )
+        self.author_gallery.list_widget.setProperty("darkMode", is_dark)
+        self.comic_gallery.list_widget.setProperty("darkMode", is_dark)
+        self.author_gallery.list_widget.viewport().update()
+        self.comic_gallery.list_widget.viewport().update()
+        for button in self.findChildren(QPushButton):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._apply_reader_capsule_styles(is_dark)
+        label = "Light mode" if is_dark else "Dark mode"
+        for button in getattr(self, "_theme_buttons", []):
+            button.setText(label)
+
+    def _apply_reader_capsule_styles(self, is_dark: bool) -> None:
+        button_style = (
+            "QPushButton {"
+            "background: rgba(255, 255, 255, 0.045);"
+            "color: #eef2f7;"
+            "border: 1px solid rgba(255, 255, 255, 0.08);"
+            "border-radius: 22px;"
+            "min-height: 44px;"
+            "padding: 0 20px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "background: rgba(255, 255, 255, 0.13);"
+            "border: 1px solid rgba(255, 255, 255, 0.2);"
+            "}"
+            "QPushButton:disabled {"
+            "background: rgba(255, 255, 255, 0.025);"
+            "color: rgba(238, 242, 247, 0.38);"
+            "border: 1px solid rgba(255, 255, 255, 0.05);"
+            "}"
+        ) if is_dark else (
+            "QPushButton {"
+            "background: rgba(255, 255, 255, 0.98);"
+            "color: #0f172a;"
+            "border: 1px solid #d8dee8;"
+            "border-radius: 22px;"
+            "min-height: 44px;"
+            "padding: 0 20px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "background: #eef4ff;"
+            "border: 1px solid #93a4bb;"
+            "}"
+            "QPushButton:disabled {"
+            "background: rgba(255, 255, 255, 0.72);"
+            "color: rgba(15, 23, 42, 0.4);"
+            "border: 1px solid #e2e8f0;"
+            "}"
+        )
+        chip_style = (
+            "QLabel {"
+            "background: rgba(255, 255, 255, 0.04);"
+            "color: #eef2f7;"
+            "border: 1px solid rgba(255, 255, 255, 0.08);"
+            "border-radius: 22px;"
+            "min-height: 44px;"
+            "padding: 0 18px;"
+            "font-size: 11px;"
+            "font-weight: 600;"
+            "}"
+        ) if is_dark else (
+            "QLabel {"
+            "background: rgba(255, 255, 255, 0.98);"
+            "color: #0f172a;"
+            "border: 1px solid #d8dee8;"
+            "border-radius: 22px;"
+            "min-height: 44px;"
+            "padding: 0 18px;"
+            "font-size: 11px;"
+            "font-weight: 600;"
+            "}"
+        )
+        for button in [
+            self.back_button,
+            self.reader_prev_button,
+            self.reader_next_button,
+            self.clear_continue_button,
+            self.resume_continue_button,
+            self.intro_resume_button,
+            self.intro_read_button,
+            self.intro_folder_button,
+        ]:
+            button.setFixedHeight(44)
+            button.setStyleSheet(button_style)
+        for chip in [self.reader_mode_chip, self.reader_progress_label]:
+            chip.setFixedHeight(44)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setStyleSheet(chip_style)
+
+    def toggle_dark_mode(self) -> None:
+        self.state.dark_mode = not self.state.dark_mode
+        self.apply_theme()
+        self.statusBar().showMessage("Dark mode on" if self.state.dark_mode else "Dark mode off")
+        self._save_state()
 
     def choose_root(self) -> None:
         start = str(self.current_root or Path.home())
@@ -1299,61 +2044,86 @@ class ComicReader(QMainWindow):
         self.state.comic_tag_filter = ""
         self.refresh_author_gallery()
         self.state.last_root = str(root)
+        self.state.last_author = ""
         self._save_state()
         self.statusBar().showMessage(f"Loaded gallery: {root}")
+
+    def _last_read_folder(self) -> Path | None:
+        if not self.state.last_folder:
+            return None
+        folder = Path(self.state.last_folder)
+        if not folder.exists():
+            return None
+        if self.current_root and self.current_root not in folder.parents and folder != self.current_root:
+            return None
+        return folder
+
+    def refresh_continue_card(self) -> None:
+        folder = self._last_read_folder()
+        if not folder:
+            self.continue_card.hide()
+            return
+        series_folder = folder.parent if folder.parent != folder else folder
+        self.continue_title.setText(folder.name)
+        self.continue_meta.setText(f"In {series_folder.name}")
+        progress_index = self.state.progress.get(str(folder), 0)
+        self.resume_continue_button.setText("Resume" if progress_index <= 0 else f"Resume from page {progress_index + 1}")
+        cover = build_cover_pixmap_for_book(folder, self.continue_cover.size(), radius=12.0)
+        if cover is not None:
+            self.continue_cover.setPixmap(cover)
+            self.continue_cover.setText("")
+        else:
+            self.continue_cover.setPixmap(QPixmap())
+            self.continue_cover.setText("No\ncover")
+        self.continue_card.show()
 
     def refresh_author_gallery(self) -> None:
         if not self.current_root:
             return
-        authors = list_subfolders(self.current_root)
-        authors = sort_folders(authors, self.state.author_sort, self.state.progress, author_mode=True)
-        subtitle = f"{len(authors)} author folders in {self.current_root}"
+        series_folders = all_series_folders(self.current_root)
+        subtitle = (
+            f"{len(series_folders)} series in {self.current_root.name}"
+            if series_folders
+            else "No series found here yet. Pick another library folder to begin."
+        )
+        self.author_brand_meta.setText(self.current_root.name.upper())
+        self.refresh_continue_card()
         self.author_gallery.populate(
-            "Author shelf 💗",
-            f"{subtitle} • right-click an author to choose a comic cover",
-            authors,
+            "Graphic series",
+            subtitle,
+            series_folders,
             self.state.progress,
             show_page_count=False,
-            thumbnail_overrides=self.state.author_thumbnail_comics,
-            favorites=self.favorite_comics_set(),
         )
+        self.author_gallery.label.setText(subtitle)
 
     def refresh_comic_gallery(self) -> None:
         if not self.current_author:
             return
-        self.refresh_tag_filter_options()
-        comics = [folder for folder in list_subfolders(self.current_author) if list_image_files(folder)]
+        comics = list_books_in_series(self.current_author)
         favorite_set = self.favorite_comics_set()
         comics.sort(key=lambda folder: (str(folder) not in favorite_set, natural_key(folder.name)))
-        if self.state.comic_tag_filter:
-            target = normalize_text(self.state.comic_tag_filter)
-            comics = [
-                folder
-                for folder in comics
-                if target in [normalize_text(tag) for tag in self.metadata.comics.get(str(folder), {}).get("tags", [])]
-            ]
         comics = sort_folders(comics, self.state.comic_sort, self.state.progress, author_mode=False)
-        subtitle = f"{len(comics)} comics by {self.current_author.name}"
-        if self.state.comic_tag_filter:
-            subtitle += f" • filtered by {self.state.comic_tag_filter}"
+        subtitle = (
+            f"{len(comics)} books in {self.current_author.name}"
+            if comics
+            else "No books in this series yet."
+        )
+        self.comic_brand_title.setText(self.current_author.name)
+        self.comic_brand_meta.setText(subtitle)
+        self.series_summary_card.hide()
         self.comic_gallery.populate(
-            f"{self.current_author.name} ✨",
+            self.current_author.name,
             subtitle,
             comics,
             self.state.progress,
             show_page_count=True,
-            metadata_records=self.metadata.comics,
             favorites=self.favorite_comics_set(),
         )
+        self.comic_gallery.label.setText(subtitle)
 
     def refresh_tag_filter_options(self) -> None:
-        if not self.current_author:
-            self.comic_gallery.set_filter_options([], "")
-            return
-        tags: set[str] = set()
-        for folder in author_comic_folders(self.current_author):
-            tags.update(self.metadata.comics.get(str(folder), {}).get("tags", []))
-        self.comic_gallery.set_filter_options(sorted(tags, key=str.lower), self.state.comic_tag_filter)
+        self.comic_gallery.set_filter_options([], "")
 
     def pending_review_count(self, scope: Path | None = None) -> int:
         if scope is None:
@@ -1362,9 +2132,7 @@ class ComicReader(QMainWindow):
         return sum(1 for folder in self.metadata.review_queue if folder.startswith(scope_prefix))
 
     def metadata_for_current_comic(self) -> dict[str, Any]:
-        if not self.current_folder:
-            return {}
-        return self.metadata.comics.get(str(self.current_folder), {})
+        return {}
 
     def favorite_comics_set(self) -> set[str]:
         return set(self.state.favorite_comics)
@@ -1404,46 +2172,48 @@ class ComicReader(QMainWindow):
             bookmarks.add(self.current_index)
             self.statusBar().showMessage(f"Bookmarked page {self.current_index + 1}")
         self.state.page_bookmarks[key] = sorted(bookmarks)
-        self.populate_page_previews()
+        self._refresh_reader_header(self.pages[self.current_index].name if self.pages else "")
         self._save_state()
+
+    def clear_continue_reading(self) -> None:
+        self.state.last_folder = ""
+        self.state.last_author = ""
+        self.refresh_continue_card()
+        self._save_state()
+        self.statusBar().showMessage("Cleared continue reading")
+
+    def resume_last_read_comic(self) -> None:
+        folder = self._last_read_folder()
+        if not folder:
+            return
+        author = folder.parent if folder.parent != folder else folder
+        if author.exists():
+            self.current_author = author
+            self.state.last_author = str(author)
+            self.refresh_comic_gallery()
+        self.current_folder = folder
+        self.state.last_folder = str(folder)
+        if not self._ensure_current_pages_loaded():
+            return
+        self.start_reading_current_comic()
 
     def open_random_comic(self) -> None:
         if not self.current_root:
-            QMessageBox.information(self, APP_NAME, "Open your library first so I can pick something random.")
+            QMessageBox.information(self, APP_NAME, "Choose a library first.")
             return
-        comics = all_comic_folders(self.current_root)
+        comics = list_books_in_series(self.current_author) if self.current_author else all_comic_folders(self.current_root)
         if not comics:
-            QMessageBox.information(self, APP_NAME, "No comics found yet.")
+            QMessageBox.information(self, APP_NAME, "No books found in this library yet.")
             return
         import random
         choice = random.choice(comics)
-        self.current_author = choice.parent
-        self.state.last_author = str(self.current_author)
-        self.refresh_comic_gallery()
         self.open_comic(choice)
 
     def apply_tag_filter_from_intro(self, link: str) -> None:
-        if not self.current_author:
-            return
-        tag = link.replace("tag:", "", 1)
-        self.state.comic_tag_filter = tag
-        self.refresh_comic_gallery()
-        self.stack.setCurrentWidget(self.comic_gallery)
-        self.statusBar().showMessage(f"Filtered comics by tag: {tag}")
-        self._save_state()
+        return
 
     def _format_tag_pills(self, tags: list[str]) -> str:
-        if not tags:
-            return "No imported tags yet — run Import Tags first."
-        pills = []
-        for tag in tags:
-            safe = tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            pills.append(
-                f'<a href="tag:{safe}" style="text-decoration:none; color:#fff4fd;">'
-                f'<span style="display:inline-block; margin:4px 6px 4px 0; padding:6px 10px; '
-                f'background:rgba(255,185,227,0.18); border:1px solid #9a78c8; border-radius:12px; color:#fff4fd;">{safe}</span></a>'
-            )
-        return "".join(pills)
+        return ""
 
     def _chip_text(self, label: str, values: list[str]) -> str:
         clean = [str(v) for v in values if v]
@@ -1451,84 +2221,49 @@ class ComicReader(QMainWindow):
 
     def populate_related_comics(self) -> None:
         self.intro_related_list.clear()
-        if not self.current_folder:
+        if not self.current_root or not self.current_folder:
             return
 
-        current_record = self.metadata_for_current_comic()
         current_path = str(self.current_folder)
-        current_tags = set(normalize_text(tag) for tag in current_record.get("tags", []))
-        current_artists = set(normalize_text(tag) for tag in current_record.get("artists", []))
-        current_parodies = set(normalize_text(tag) for tag in current_record.get("parodies", []))
+        candidate_scope = list_books_in_series(self.current_author) if self.current_author else all_comic_folders(self.current_root)
+        favorites = [Path(path) for path in self.state.favorite_comics if path != current_path and Path(path).exists()]
+        recents = [
+            Path(path)
+            for path, _ in sorted(self.state.progress.items(), key=lambda item: item[1], reverse=True)
+            if path != current_path and Path(path).exists()
+        ]
 
-        scored: list[tuple[int, str, dict[str, Any]]] = []
-        for folder_path, record in self.metadata.comics.items():
-            if folder_path == current_path:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for folder in favorites + recents + candidate_scope:
+            key = str(folder)
+            if key == current_path or key in seen or not count_pages_in_book(folder):
                 continue
-            score = 0
-            score += 4 * len(current_artists & {normalize_text(v) for v in record.get("artists", [])})
-            score += 3 * len(current_parodies & {normalize_text(v) for v in record.get("parodies", [])})
-            score += 1 * len(current_tags & {normalize_text(v) for v in record.get("tags", [])})
-            if score <= 0:
-                continue
-            scored.append((score, folder_path, record))
+            seen.add(key)
+            candidates.append(folder)
+            if len(candidates) >= 12:
+                break
 
-        scored.sort(key=lambda row: (-row[0], natural_key(Path(row[1]).name)))
-        for score, folder_path, record in scored[:12]:
-            folder = Path(folder_path)
-            title = record.get("title") or folder.name
-            artist = ", ".join(record.get("artists", [])[:2]) or folder.parent.name
-            shared_tags = []
-            record_tags = [normalize_text(v) for v in record.get("tags", [])]
-            for tag in record.get("tags", []):
-                if normalize_text(tag) in current_tags and len(shared_tags) < 3:
-                    shared_tags.append(tag)
-            subtitle = artist
-            if shared_tags:
-                subtitle += f" • shared: {', '.join(shared_tags)}"
-            item = QListWidgetItem(f"{title}\n{subtitle}")
-            item.setData(Qt.ItemDataRole.UserRole, folder_path)
-            item.setToolTip(f"Match score: {score}\n{title}\n{subtitle}")
-            cover = first_cover_in_folder(folder)
-            if cover:
-                pix = build_cover_pixmap(cover, QSize(84, 118))
-                if pix is not None:
-                    item.setIcon(QIcon(pix))
-            item.setSizeHint(QSize(0, 82))
+        for folder in candidates:
+            page_count = count_pages(folder)
+            progress_text = self.state.progress.get(str(folder))
+            subtitle = f"{page_count} pages"
+            if progress_text is not None:
+                subtitle += f" • last opened page {progress_text + 1}"
+            item = QListWidgetItem(f"{folder.name}\n{subtitle}")
+            item.setData(Qt.ItemDataRole.UserRole, str(folder))
+            item.setToolTip(f"{folder}\n{subtitle}")
+            pix = build_cover_pixmap_for_book(folder, QSize(84, 118))
+            if pix is not None:
+                item.setIcon(QIcon(pix))
+            item.setSizeHint(QSize(0, 138))
             self.intro_related_list.addItem(item)
 
         if self.intro_related_list.count() == 0:
-            empty = QListWidgetItem("No related comics yet — import more tags to build recommendations.")
+            empty = QListWidgetItem("Saved books and recently opened ones will show up here.")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             empty.setSizeHint(QSize(0, 58))
             self.intro_related_list.addItem(empty)
-
-    def populate_page_previews(self) -> None:
-        self.intro_page_preview_list.clear()
-        if not self.pages:
-            return
-        bookmarks = set(self.current_bookmarks())
-        limit = min(len(self.pages), 18)
-        step = max(1, len(self.pages) // max(1, limit))
-        chosen_indexes = list(dict.fromkeys(list(range(0, len(self.pages), step))[:limit]))
-        for index in chosen_indexes:
-            page = self.pages[index]
-            item = QListWidgetItem(f"Page {index + 1}")
-            item.setData(Qt.ItemDataRole.UserRole, index)
-            if index in bookmarks:
-                item.setText(f"★ Page {index + 1}")
-            pix = build_cover_pixmap(page, QSize(120, 168))
-            if pix is not None:
-                item.setIcon(QIcon(pix))
-            item.setToolTip(page.name)
-            item.setSizeHint(QSize(140, 210))
-            self.intro_page_preview_list.addItem(item)
-
-    def _open_preview_page(self, item: QListWidgetItem) -> None:
-        page_index = item.data(Qt.ItemDataRole.UserRole)
-        if page_index is None:
-            return
-        self.current_index = int(page_index)
-        self.start_reading_current_comic()
 
     def _open_related_comic(self, item: QListWidgetItem) -> None:
         folder = item.data(Qt.ItemDataRole.UserRole)
@@ -1539,11 +2274,27 @@ class ComicReader(QMainWindow):
         if not self.current_folder:
             return
         QApplication.clipboard().setText(str(self.current_folder))
-        self.statusBar().showMessage("Comic folder path copied")
+        self.statusBar().showMessage("Folder path copied")
+
+    def _ensure_current_pages_loaded(self) -> bool:
+        if not self.current_folder:
+            return False
+        if self.pages:
+            return True
+        try:
+            self.pages = list_pages_for_book(self.current_folder)
+        except Exception:
+            self.pages = []
+        if not self.pages:
+            return False
+        self.current_index = max(0, min(self.state.progress.get(str(self.current_folder), 0), len(self.pages) - 1))
+        return True
 
     def resume_current_comic(self) -> None:
-        if not self.current_folder or not self.pages:
+        if not self.current_folder or not self._ensure_current_pages_loaded():
             return
+        self.fit_mode = "fit_page"
+        self.zoom_percent = 100
         self.stack.setCurrentWidget(self.reader_page)
         self.load_current_page()
 
@@ -1551,55 +2302,43 @@ class ComicReader(QMainWindow):
         if not self.current_folder:
             return
 
-        record = self.metadata_for_current_comic()
         pages = len(self.pages)
-        cover_path = first_cover_in_folder(self.current_folder)
-        if cover_path:
-            cover = build_cover_pixmap(cover_path, self.intro_cover_label.size())
+        cover = build_cover_pixmap_for_book(self.current_folder, self.intro_cover_label.size())
+        if cover is not None:
             self.intro_cover_label.setText("")
             self.intro_cover_label.setPixmap(cover)
         else:
             self.intro_cover_label.setPixmap(QPixmap())
             self.intro_cover_label.setText("No cover")
 
-        display_title = record.get("title") or self.current_folder.name
-        self.intro_title_label.setText(display_title)
-
-        meta_bits = [f"{pages} pages"]
-        if record.get("language"):
-            meta_bits.append(str(record["language"]).replace(",", " •"))
-        if record.get("category"):
-            meta_bits.append(record["category"])
-        self.intro_meta_label.setText(" • ".join(meta_bits))
-
-        code = record.get("id") or "—"
-        self.intro_code_badge.setText(f"Code {code}")
-        self.intro_status_badge.setText("Tags imported" if record.get("tags") else "Tags pending")
-        self.intro_favorite_badge.setText("♥ Favorite" if self.is_current_favorite() else "♡ Not favorite")
-        self.intro_favorite_button.setText("♥ Unfavorite" if self.is_current_favorite() else "♡ Favorite")
+        self.intro_title_label.setText(self.current_folder.name)
 
         progress_index = self.state.progress.get(str(self.current_folder), 0)
         is_resumable = str(self.current_folder) in self.state.progress and pages > 1
+        meta_bits = [f"{pages} pages"]
+        if self.current_root:
+            try:
+                meta_bits.append(str(self.current_folder.relative_to(self.current_root).parent))
+            except ValueError:
+                pass
+        self.intro_meta_label.setText(" • ".join(bit for bit in meta_bits if bit and bit != '.'))
+
+        self.intro_code_badge.setText("Issue")
+        self.intro_status_badge.setText(f"Page {progress_index + 1} ready" if pages else "Ready")
+        self.intro_favorite_badge.setText("Saved" if self.is_current_favorite() else "Not saved")
+
         self.intro_resume_button.setVisible(is_resumable)
         if is_resumable:
             self.intro_resume_button.setText(f"Resume from page {progress_index + 1}")
-        artist_text = ", ".join(record.get("artists", [])[:2]) or self.current_folder.parent.name
-        parody_text = ", ".join(record.get("parodies", [])[:2]) or "original"
-        self.intro_summary_label.setText(
-            f"<b>{artist_text}</b> • {parody_text}<br>"
-            f"A glossy library card for this comic before you dive into the pages."
-        )
 
-        tags = record.get("tags") or []
-        self.intro_tags_label.setText(self._format_tag_pills(tags))
-        self.intro_tags_label.setTextFormat(Qt.TextFormat.RichText)
+        parent_name = self.current_folder.parent.name if self.current_folder.parent != self.current_folder else "Library"
+        self.intro_summary_label.setText(f"<b>{parent_name}</b><br>{pages} pages in this file")
 
-        self.intro_artist_chip.setText(self._chip_text("Artists", record.get("artists") or [self.current_folder.parent.name]))
-        self.intro_group_chip.setText(self._chip_text("Groups", record.get("groups") or []))
-        self.intro_parody_chip.setText(self._chip_text("Parodies", record.get("parodies") or ["original"]))
-        self.intro_character_chip.setText(self._chip_text("Characters", record.get("characters") or []))
+        self.intro_artist_chip.setText(self._chip_text("Folder", [self.current_folder.name]))
+        self.intro_group_chip.setText(self._chip_text("Parent", [parent_name]))
+        self.intro_parody_chip.setText(self._chip_text("Pages", [str(pages)]))
+        self.intro_character_chip.setText(self._chip_text("Last opened", [str(progress_index + 1)] if is_resumable else ["Not started"]))
         self.populate_related_comics()
-        self.populate_page_previews()
 
     def show_comic_intro(self) -> None:
         if not self.current_folder:
@@ -1609,193 +2348,26 @@ class ComicReader(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} — {self.current_folder.name}")
 
     def start_reading_current_comic(self) -> None:
-        if not self.current_folder or not self.pages:
+        if not self.current_folder or not self._ensure_current_pages_loaded():
             return
+        self.fit_mode = "fit_page"
+        self.zoom_percent = 100
         self.stack.setCurrentWidget(self.reader_page)
         self.load_current_page()
         self._save_state()
 
     def on_tag_filter_changed(self, tag: str) -> None:
-        self.state.comic_tag_filter = tag
-        self.refresh_comic_gallery()
-        self._save_state()
+        return
 
     def prepare_tag_archive(self) -> bool:
-        if ARCHIVE_DB_PATH.exists() and ARCHIVE_DB_PATH.stat().st_size > 0:
-            self.statusBar().showMessage("Tag archive is ready.")
-            QMessageBox.information(self, APP_NAME, f"Archive already ready:\n{ARCHIVE_DB_PATH}")
-            return True
-
-        progress = QProgressDialog("Preparing local tag archive...", "Cancel", 0, 0, self)
-        progress.setWindowTitle(APP_NAME)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        try:
-            manifest = archive_part_manifest()
-        except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"Couldn't fetch archive manifest:\n{exc}")
-            return False
-
-        total_bytes = sum(int(item.get("size") or 0) for item in manifest) or 1
-        progress.setMaximum(total_bytes)
-        downloaded_so_far = 0
-
-        def on_progress(written: int, part_total: int | None, label: str) -> None:
-            nonlocal downloaded_so_far
-            part_total = part_total or 0
-            base_done = downloaded_so_far - part_total if downloaded_so_far >= part_total else downloaded_so_far
-            progress.setLabelText(label)
-            progress.setValue(min(total_bytes, base_done + written))
-            QApplication.processEvents()
-            if progress.wasCanceled():
-                raise RuntimeError("Archive download cancelled")
-
-        try:
-            ARCHIVE_TMP_DIR.mkdir(parents=True, exist_ok=True)
-            for item in manifest:
-                part_path = ARCHIVE_TMP_DIR / item["name"]
-                size = int(item.get("size") or 0)
-                downloaded_so_far += size
-                if part_path.exists() and part_path.stat().st_size == size and size > 0:
-                    progress.setLabelText(f"Have {item['name']}")
-                    progress.setValue(min(total_bytes, downloaded_so_far))
-                    continue
-                downloaded_so_far -= size
-                download_archive_file(item["download_url"], part_path, progress=on_progress, label=f"Downloading {item['name']}")
-                downloaded_so_far += size
-                progress.setValue(min(total_bytes, downloaded_so_far))
-
-            progress.setLabelText("Merging archive...")
-            QApplication.processEvents()
-            ensure_archive_database()
-            progress.setValue(total_bytes)
-        except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"Preparing the local archive failed:\n{exc}")
-            return False
-
-        self.statusBar().showMessage(f"Tag archive ready: {ARCHIVE_DB_PATH}")
-        QMessageBox.information(self, APP_NAME, "Local tag archive is ready now 💗")
-        return True
+        QMessageBox.information(self, APP_NAME, "This SFW build does not use external tag archives.")
+        return False
 
     def import_tags_for_scope(self) -> None:
-        if not self.current_root:
-            QMessageBox.information(self, APP_NAME, "Open your library first so I know what to tag.")
-            return
-
-        if not ARCHIVE_DB_PATH.exists() and not self.prepare_tag_archive():
-            return
-
-        if self.current_author:
-            comics = author_comic_folders(self.current_author)
-            scope_name = self.current_author.name
-        else:
-            comics = all_comic_folders(self.current_root)
-            scope_name = self.current_root.name
-
-        if not comics:
-            QMessageBox.information(self, APP_NAME, "No comics found in this scope.")
-            return
-
-        self.metadata.review_queue = {}
-        progress = QProgressDialog(f"Importing tags for {scope_name}...", "Cancel", 0, len(comics), self)
-        progress.setWindowTitle(APP_NAME)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        auto_matched = 0
-        unmatched = 0
-        skipped = 0
-        archive_errors = 0
-
-        for index, folder in enumerate(comics, start=1):
-            progress.setValue(index - 1)
-            progress.setLabelText(f"Matching {folder.name}")
-            QApplication.processEvents()
-            if progress.wasCanceled():
-                break
-
-            existing = self.metadata.comics.get(str(folder))
-            if existing and existing.get("match_status") == "matched":
-                skipped += 1
-                continue
-
-            candidates = fetch_archive_candidates(folder)
-            if candidates is None:
-                archive_errors += 1
-                continue
-            if not candidates:
-                unmatched += 1
-                continue
-
-            top = candidates[0]
-            score = top.get("score", 0.0)
-            if score > 0.0:
-                self.metadata.comics[str(folder)] = metadata_record_from_candidate(top)
-                self.metadata.review_queue.pop(str(folder), None)
-                auto_matched += 1
-            else:
-                unmatched += 1
-
-        progress.setValue(len(comics))
-        self.metadata.save()
-
-        if self.current_author:
-            self.refresh_comic_gallery()
-
-        self.statusBar().showMessage(
-            f"Tag import finished — {auto_matched} imported, {unmatched} unmatched, {skipped} already tagged, {archive_errors} archive errors"
-        )
-        QMessageBox.information(
-            self,
-            APP_NAME,
-            (
-                f"Import finished for {scope_name}.\n\n"
-                f"Imported: {auto_matched}\n"
-                f"Unmatched: {unmatched}\n"
-                f"Already tagged: {skipped}\n"
-                f"Archive errors: {archive_errors}"
-            ),
-        )
+        QMessageBox.information(self, APP_NAME, "This SFW build does not import external tags or metadata.")
 
     def review_tag_matches(self) -> None:
-        if not self.metadata.review_queue:
-            QMessageBox.information(self, APP_NAME, "No pending tag matches right now.")
-            return
-
-        folder_path = None
-        candidates = None
-        if self.current_author:
-            author_prefix = str(self.current_author)
-            for path, rows in self.metadata.review_queue.items():
-                if path.startswith(author_prefix):
-                    folder_path = path
-                    candidates = rows
-                    break
-        if folder_path is None:
-            folder_path, candidates = next(iter(self.metadata.review_queue.items()))
-
-        folder = Path(folder_path)
-        labels = [candidate_label(candidate) for candidate in candidates]
-        choice, accepted = QInputDialog.getItem(
-            self,
-            "Review tag match",
-            f"Pick the right match for:\n{folder.name}",
-            labels,
-            0,
-            False,
-        )
-        if not accepted:
-            return
-
-        selected = candidates[labels.index(choice)]
-        self.metadata.comics[folder_path] = metadata_record_from_candidate(selected)
-        self.metadata.review_queue.pop(folder_path, None)
-        self.metadata.save()
-        if self.current_author and folder.parent == self.current_author:
-            self.refresh_comic_gallery()
-        chosen_title = selected.get("CLEAN_TITLE") or selected.get("EN_TITLE") or folder.name
-        self.statusBar().showMessage(f"Tagged {folder.name} → {chosen_title}")
+        QMessageBox.information(self, APP_NAME, "This SFW build has no pending external metadata reviews.")
 
     def set_author_cover_from_comic(self, author: Path, comic_folder: Path) -> None:
         cover = first_cover_in_folder(comic_folder)
@@ -1835,62 +2407,81 @@ class ComicReader(QMainWindow):
         self._save_state()
 
     def open_author(self, author: Path) -> None:
-        comics = [folder for folder in list_subfolders(author) if list_image_files(folder)]
-        if not comics:
-            QMessageBox.information(self, APP_NAME, "No image folders found for that author.")
+        books = list_books_in_series(author)
+        if not books:
+            QMessageBox.information(self, APP_NAME, "No books in this series yet.")
             return
-
         self.current_author = author
         self.current_folder = None
-        self.state.comic_tag_filter = ""
         self.refresh_comic_gallery()
-        self.stack.setCurrentWidget(self.comic_gallery)
+        self.stack.setCurrentWidget(self.comic_gallery_page)
+        self.setWindowTitle(f"{APP_NAME} — {author.name}")
         self.state.last_author = str(author)
         self._save_state()
 
     def show_author_gallery(self) -> None:
-        self.stack.setCurrentWidget(self.author_gallery)
+        if self.current_root:
+            self.refresh_author_gallery()
+        self.stack.setCurrentWidget(self.author_gallery_page)
         self.setWindowTitle(f"{APP_NAME} — Library")
 
     def show_comic_gallery(self) -> None:
         if self.current_author:
             self.refresh_comic_gallery()
-            self.stack.setCurrentWidget(self.comic_gallery)
+            self.stack.setCurrentWidget(self.comic_gallery_page)
             self.setWindowTitle(f"{APP_NAME} — {self.current_author.name}")
 
     def open_comic(self, folder: Path) -> None:
         try:
-            pages = list_image_files(folder)
+            pages = list_pages_for_book(folder)
         except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f"Couldn't open comic:\n{exc}")
+            QMessageBox.critical(self, APP_NAME, f"Couldn't open album:\n{exc}")
             return
 
         if not pages:
-            QMessageBox.information(self, APP_NAME, "No supported images found in that folder.")
+            QMessageBox.information(self, APP_NAME, "This book doesn't have any supported pages.")
             return
 
         self.current_folder = folder
         self.pages = pages
         self.current_index = max(0, min(self.state.progress.get(str(folder), 0), len(self.pages) - 1))
-        self.show_comic_intro()
+        self.start_reading_current_comic()
         self._save_state()
+
+    def _reader_mode_label(self) -> str:
+        if self.fit_mode == "fit_width":
+            return "FIT WIDTH"
+        if self.fit_mode == "fit_page":
+            return "FIT PAGE"
+        return f"FREE ZOOM {self.zoom_percent}%"
+
+    def _refresh_reader_header(self, page_name: str = "") -> None:
+        total_pages = len(self.pages)
+        current_page = self.current_index + 1 if total_pages else 0
+        self.reader_mode_chip.setText(self._reader_mode_label())
+        self.reader_progress_label.setText(f"PAGE {current_page} / {total_pages}" if total_pages else "PAGE 0 / 0")
+        self.reader_prev_button.setEnabled(total_pages > 0 and self.current_index > 0)
+        self.reader_next_button.setEnabled(total_pages > 0 and self.current_index < total_pages - 1)
+        if page_name:
+            bookmark_mark = " • BOOKMARKED" if self.current_index in self.current_bookmarks() else ""
+            self.reader_meta_label.setText(f"{page_name}{bookmark_mark}")
 
     def load_current_page(self) -> None:
         if not self.pages:
             return
 
         page = self.pages[self.current_index]
-        reader = QImageReader(str(page))
-        reader.setAutoTransform(True)
-        image = reader.read()
-        if image.isNull():
-            QMessageBox.warning(self, APP_NAME, f"Failed to load image:\n{page.name}")
+        pixmap = load_page_pixmap(page)
+        if pixmap is None:
+            QMessageBox.warning(self, APP_NAME, f"Failed to load page:\n{page.name}")
             return
 
-        self.base_pixmap = QPixmap.fromImage(image)
+        self.base_pixmap = pixmap
         self.apply_view()
         folder_name = self.current_folder.name if self.current_folder else ""
         self.setWindowTitle(f"{APP_NAME} — {folder_name} — {page.name}")
+        self.reader_title_label.setText(folder_name or "Reader")
+        self._refresh_reader_header(page.name)
         bookmark_mark = " ★" if self.current_index in self.current_bookmarks() else ""
         self.statusBar().showMessage(f"{self.current_index + 1}/{len(self.pages)} — {page.name}{bookmark_mark}")
         if self.current_folder:
@@ -1931,6 +2522,7 @@ class ComicReader(QMainWindow):
         if mode in {"fit_width", "fit_page"} and self.zoom_percent < 100:
             self.zoom_percent = 100
         self.apply_view()
+        self._refresh_reader_header(self.pages[self.current_index].name if self.pages else "")
         self._save_state()
 
     def zoom_in(self) -> None:
@@ -1938,6 +2530,7 @@ class ComicReader(QMainWindow):
             return
         self.zoom_percent = min(400, self.zoom_percent + 25)
         self.apply_view()
+        self._refresh_reader_header(self.pages[self.current_index].name if self.pages else "")
         self._save_state()
 
     def zoom_out(self) -> None:
@@ -1945,11 +2538,13 @@ class ComicReader(QMainWindow):
             return
         self.zoom_percent = max(25, self.zoom_percent - 25)
         self.apply_view()
+        self._refresh_reader_header(self.pages[self.current_index].name if self.pages else "")
         self._save_state()
 
     def reset_zoom(self) -> None:
         self.zoom_percent = 100
         self.apply_view()
+        self._refresh_reader_header(self.pages[self.current_index].name if self.pages else "")
         self._save_state()
 
     def next_page(self) -> None:
@@ -1965,10 +2560,10 @@ class ComicReader(QMainWindow):
     def go_back(self) -> None:
         current = self.stack.currentWidget()
         if current is self.reader_page:
-            self.show_comic_intro()
+            self.show_comic_gallery()
         elif current is self.comic_intro_page:
             self.show_comic_gallery()
-        elif current is self.comic_gallery:
+        elif current is self.comic_gallery_page:
             self.show_author_gallery()
 
     def toggle_fullscreen(self) -> None:
